@@ -1,0 +1,72 @@
+name: Download FIDE player list
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 04:23 UTC on the first three days of each month.
+    - cron: '23 4 1-3 * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fide-download
+  cancel-in-progress: false
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Download official ZIP
+        run: |
+          curl --fail --location \
+            --connect-timeout 30 \
+            --max-time 600 \
+            --retry 3 \
+            --retry-delay 15 \
+            --output players_list.zip \
+            https://ratings.fide.com/download/players_list.zip
+
+      - name: Validate ZIP and expected file
+        run: |
+          python3 - <<'PY'
+          import zipfile
+
+          with zipfile.ZipFile("players_list.zip") as archive:
+              bad = archive.testzip()
+              if bad:
+                  raise RuntimeError(f"Corrupt ZIP entry: {bad}")
+
+              matches = [
+                  name for name in archive.namelist()
+                  if name.lower().endswith("players_list_foa.txt")
+              ]
+              if len(matches) != 1:
+                  raise RuntimeError(
+                      f"Expected one players_list_foa.txt; found {matches}"
+                  )
+
+              with archive.open(matches[0]) as source:
+                  header = source.readline().decode("utf-8-sig").rstrip()
+                  if header[113:118] != "SRtng":
+                      raise RuntimeError(f"Unexpected header: {header!r}")
+
+              print("ZIP validated successfully")
+          PY
+
+      - name: Publish download
+        run: |
+          if gh release view current >/dev/null 2>&1; then
+            gh release upload current players_list.zip --clobber
+          else
+            gh release create current players_list.zip \
+              --target "${GITHUB_SHA}" \
+              --title "Current FIDE player list" \
+              --notes "Official FIDE combined player list, downloaded automatically."
+          fi
